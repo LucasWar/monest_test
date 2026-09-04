@@ -1,42 +1,13 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Patch,
-  Param,
-  Delete,
-} from '@nestjs/common';
+import { Controller, Get, Param } from '@nestjs/common';
 import { CepService } from './cep.service';
-import { CreateCepDto } from './dto/create-cep.dto';
-import { UpdateCepDto } from './dto/update-cep.dto';
+import { CepValidationPipe } from './pipe/cep-validation.pipe';
 
 @Controller('cep')
 export class CepController {
   constructor(private readonly cepService: CepService) {}
 
-  @Post()
-  create(@Body() createCepDto: CreateCepDto) {
-    return this.cepService.create(createCepDto);
-  }
-
-  @Get()
-  findAll() {
-    return this.cepService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.cepService.findOne(+id);
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateCepDto: UpdateCepDto) {
-    return this.cepService.update(+id, updateCepDto);
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.cepService.remove(+id);
+  @Get(':cep')
+  findOne(@Param('cep', CepValidationPipe) cep: string) {
+    return this.cepService.findCep(cep);
   }
 }
