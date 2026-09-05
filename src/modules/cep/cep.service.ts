@@ -4,19 +4,25 @@ import type { Cache } from 'cache-manager';
 import {
   AllProvidersUnavailableException,
   CepNotFoundException,
-  CepProviderTimeoutException,
 } from 'src/common/exeptions/exeptions';
-import { CepResult } from './interfaces/cep-result.interface';
-import { ICepProvider } from './interfaces/Icep.provider';
+import type { CepResult } from './interfaces/cep-result.interface';
+import type { ICepProvider } from './interfaces/Icep.provider';
 import { CEP_PROVIDERS } from './intergrations/cep-providers.tokens';
+import { RESOLUTION_STRATEGY } from './strategies/resolution-strategy.tokens';
+import type { ICepResolutionStrategy } from './strategies/interfaces/cep-resolution.strategy.interface';
+import { PROVIDER_ORDER_STRATEGY } from './strategies/provider-order.tokens';
+import type { IProviderOrderStrategy } from './strategies/interfaces/provider-order.strategy.interface';
 
 @Injectable()
 export class CepService {
   private readonly logger = new Logger(CepService.name);
-  private requestCount = 0;
 
   constructor(
     @Inject(CEP_PROVIDERS) private readonly providers: ICepProvider[],
+    @Inject(RESOLUTION_STRATEGY)
+    private readonly resolutionStrategy: ICepResolutionStrategy,
+    @Inject(PROVIDER_ORDER_STRATEGY)
+    private readonly providerOrderStrategy: IProviderOrderStrategy,
     @Inject(CACHE_MANAGER) private readonly cache: Cache,
   ) {}
 
@@ -29,65 +35,35 @@ export class CepService {
       return cached;
     }
 
-    const result = await this.fetchFromProviders(cep);
+    const result = await this.resolveWithFallback(cep);
     await this.cache.set(cacheKey, result);
 
     return result;
   }
 
-  private async fetchFromProviders(cep: string): Promise<CepResult> {
-    const order = this.getProviderOrder();
+  private async resolveWithFallback(cep: string): Promise<CepResult> {
+    const order = this.providerOrderStrategy.getOrder(this.providers);
     const errors: { provider: string; reason: string }[] = [];
-    let anyNotFound = false;
+    let allProvidersNotFound = order.length > 0;
 
     for (const provider of order) {
       try {
-        const result = await this.withTimeout(provider.fetch(cep), 3000);
-        this.logger.log(`CEP ${cep} resolvido via ${provider.name}`);
-        return result;
+        return await this.resolutionStrategy.resolve(cep, provider);
       } catch (err) {
         const reason = this.getErrorMessage(err);
         errors.push({ provider: provider.name, reason });
-        this.logger.warn(
-          `Provider ${provider.name} falhou para CEP ${cep}: ${reason}`,
-        );
 
-        if (err instanceof CepNotFoundException) {
-          anyNotFound = true;
-        }
+        allProvidersNotFound =
+          allProvidersNotFound && err instanceof CepNotFoundException;
         continue;
       }
     }
 
-    if (anyNotFound) {
+    if (allProvidersNotFound) {
       throw new CepNotFoundException(cep, 'all');
     }
 
     throw new AllProvidersUnavailableException(cep, errors);
-  }
-
-  private getProviderOrder(): ICepProvider[] {
-    const startIndex = this.requestCount % this.providers.length;
-    this.requestCount++;
-
-    return [
-      ...this.providers.slice(startIndex),
-      ...this.providers.slice(0, startIndex),
-    ];
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout>;
-    const timeoutPromise = new Promise<T>((_, reject) => {
-      timeoutId = setTimeout(
-        () => reject(new CepProviderTimeoutException(ms)),
-        ms,
-      );
-    });
-
-    return Promise.race([promise, timeoutPromise]).finally(() => {
-      clearTimeout(timeoutId);
-    });
   }
 
   private getErrorMessage(err: unknown): string {

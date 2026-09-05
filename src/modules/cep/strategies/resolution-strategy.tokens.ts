@@ -1,0 +1,1 @@
+export const RESOLUTION_STRATEGY = Symbol('RESOLUTION_STRATEGY');

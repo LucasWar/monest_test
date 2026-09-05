@@ -9,6 +9,10 @@ import {
   CepProviderUnavailableException,
 } from 'src/common/exeptions/exeptions';
 import { CEP_PROVIDERS } from '../intergrations/cep-providers.tokens';
+import { PROVIDER_ORDER_STRATEGY } from '../strategies/provider-order.tokens';
+import { RESOLUTION_STRATEGY } from '../strategies/resolution-strategy.tokens';
+import type { IProviderOrderStrategy } from '../strategies/interfaces/provider-order.strategy.interface';
+import type { ICepResolutionStrategy } from '../strategies/interfaces/cep-resolution.strategy.interface';
 
 jest.mock('@nestjs/cache-manager', () => ({
   CACHE_MANAGER: Symbol('CACHE_MANAGER'),
@@ -19,10 +23,18 @@ describe('CepService', () => {
   let viaCepMock: jest.Mocked<ICepProvider>;
   let brasilApiMock: jest.Mocked<ICepProvider>;
   let cacheMock: { get: jest.Mock; set: jest.Mock };
+  let providerOrderStrategyMock: jest.Mocked<IProviderOrderStrategy>;
+  let resolutionStrategyMock: jest.Mocked<ICepResolutionStrategy>;
 
   beforeEach(async () => {
     viaCepMock = { name: 'viacep', fetch: jest.fn() };
     brasilApiMock = { name: 'brasilapi', fetch: jest.fn() };
+    providerOrderStrategyMock = {
+      getOrder: jest.fn().mockReturnValue([viaCepMock, brasilApiMock]),
+    };
+    resolutionStrategyMock = {
+      resolve: jest.fn((cep, provider) => provider.fetch(cep)),
+    };
     cacheMock = {
       get: jest.fn().mockResolvedValue(undefined),
       set: jest.fn().mockResolvedValue(undefined),
@@ -32,6 +44,11 @@ describe('CepService', () => {
       providers: [
         CepService,
         { provide: CEP_PROVIDERS, useValue: [viaCepMock, brasilApiMock] },
+        { provide: RESOLUTION_STRATEGY, useValue: resolutionStrategyMock },
+        {
+          provide: PROVIDER_ORDER_STRATEGY,
+          useValue: providerOrderStrategyMock,
+        },
         { provide: CACHE_MANAGER, useValue: cacheMock },
       ],
     }).compile();
@@ -87,8 +104,23 @@ describe('CepService', () => {
     );
   });
 
+  it('retorna indisponibilidade quando há mistura de não encontrado e falha', async () => {
+    viaCepMock.fetch.mockRejectedValue(
+      new CepNotFoundException('00000000', 'viacep'),
+    );
+    brasilApiMock.fetch.mockRejectedValue(
+      new CepProviderUnavailableException('ECONNREFUSED'),
+    );
+
+    await expect(service.findByCep('00000000')).rejects.toThrow(
+      AllProvidersUnavailableException,
+    );
+  });
+
   it('simula timeout de um provider', async () => {
-    viaCepMock.fetch.mockImplementation(() => new Promise(() => {}));
+    resolutionStrategyMock.resolve
+      .mockRejectedValueOnce(new Error('timeout'))
+      .mockImplementationOnce((cep, provider) => provider.fetch(cep));
     brasilApiMock.fetch.mockResolvedValue({
       cep: '01310000',
       logradouro: 'Av. Paulista',
@@ -98,7 +130,7 @@ describe('CepService', () => {
     });
 
     const result = await service.findByCep('01310000');
-    expect(result).toBeDefined(); // veio do brasilapi, viacep estourou timeout
+    expect(result).toBeDefined();
   });
 
   it('lança AllProvidersUnavailableException quando os dois falham', async () => {
