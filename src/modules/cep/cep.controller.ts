@@ -8,6 +8,6 @@ export class CepController {
 
   @Get(':cep')
   findOne(@Param('cep', CepValidationPipe) cep: string) {
-    return this.cepService.findCep(cep);
+    return this.cepService.findByCep(cep);
   }
 }
