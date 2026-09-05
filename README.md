@@ -1,98 +1,291 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# API de Consulta de CEP
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API NestJS para consulta de CEP usando ViaCEP e BrasilAPI. A aplicação possui cache Redis, fallback entre providers, timeout por tentativa, validação das respostas externas com Zod e logs estruturados da requisição.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Índice
 
-## Description
+- [Visão geral](#visão-geral)
+- [Como executar](#como-executar)
+- [Uso da API](#uso-da-api)
+- [Arquitetura](#arquitetura)
+- [Design patterns](#design-patterns)
+- [Tratamento de erros](#tratamento-de-erros)
+- [Decisões e trade-offs](#decisões-e-trade-offs)
+- [Testes](#testes)
+- [Estrutura de pastas](#estrutura-de-pastas)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Visão geral
 
-## Project setup
+O endpoint `GET /cep/:cep` consulta um CEP em duas fontes externas:
 
-```bash
-$ npm install
+- ViaCEP
+- BrasilAPI
+
+O fluxo usa Redis como cache de leitura. Quando há um valor cacheado, ele é retornado sem chamar as APIs externas. Em caso de cache miss, os providers são consultados na ordem definida pela estratégia round-robin. Se um provider falhar, o próximo é tentado.
+
+Todos os providers retornam o mesmo contrato interno:
+
+```json
+{
+  "cep": "01310000",
+  "logradouro": "Avenida Paulista",
+  "bairro": "Bela Vista",
+  "cidade": "São Paulo",
+  "uf": "SP"
+}
 ```
 
-## Compile and run the project
+## Como executar
+
+### Pré-requisitos
+
+- Node.js 18 ou superior
+- Docker e Docker Compose
+
+### Instalação
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install
+docker compose up -d
+cp .env.example .env
+npm run start:dev
 ```
 
-## Run tests
+A API fica disponível em `http://localhost:3000`.
+
+No Windows PowerShell, o arquivo `.env.example` pode ser copiado com:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+### Variáveis de ambiente
+
+```env
+REDIS_HOST=localhost
+REDIS_PORT=6379
+```
+
+O `PORT` também pode ser definido para alterar a porta HTTP; quando não informado, a aplicação usa `3000`.
+
+## Uso da API
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+curl http://localhost:3000/cep/01310000
 ```
 
-## Deployment
+O parâmetro aceita números ou uma representação formatada, porque a pipe remove caracteres não numéricos antes de validar. O valor normalizado precisa ter exatamente oito dígitos.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Arquitetura
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Fluxo de uma consulta
+
+```text
+GET /cep/:cep
+    |
+    v
+CepValidationPipe
+    |
+    v
+CepController + LoggingInterceptor
+    |
+    v
+CepService.findByCep
+    |
+    +--> Redis cache hit ----------------------> retorna o resultado
+    |
+    +--> cache miss
+           |
+           v
+    ProviderOrderStrategy (round-robin)
+           |
+           +--> ViaCepProvider   --+
+           |                       |
+           +--> BrasilApiProvider -+--> TimeoutResolutionStrategy
+                                           |
+                                  sucesso -> grava no Redis e retorna
+                                  falha   -> tenta o próximo provider
+```
+
+O timeout é de 3 segundos por tentativa. O resultado de uma consulta bem-sucedida é gravado no Redis com TTL de 30 dias.
+
+### Camadas principais
+
+- `CepValidationPipe`: normaliza e valida o CEP antes da consulta.
+- `CepController`: expõe a rota HTTP e aplica o interceptor de logging.
+- `CepService`: coordena cache, ordem dos providers, fallback e classificação do erro final.
+- `ICepProvider`: contrato comum para fontes de dados de CEP.
+- `TimeoutResolutionStrategy`: executa uma tentativa com timeout e registra o resultado.
+- `RoundRobinProviderOrderStrategy`: define a ordem dos providers em cada requisição.
+- `AppExceptionFilter`: converte exceções em respostas HTTP padronizadas.
+
+## Design patterns
+
+### Strategy: resolução de uma tentativa
+
+`ICepResolutionStrategy` define como um provider deve ser consultado:
+
+```typescript
+interface ICepResolutionStrategy {
+  resolve(cep: string, provider: ICepProvider): Promise<CepResult>;
+}
+```
+
+`TimeoutResolutionStrategy` é a implementação atual. Ela aplica o timeout de 3 segundos, limpa o timer quando a operação termina e propaga o erro original para que o serviço possa decidir o fallback.
+
+Essa separação permite adicionar outra forma de resolução, como retry ou circuit breaker, sem colocar essa lógica dentro do `CepService`.
+
+### Strategy: ordenação dos providers
+
+`IProviderOrderStrategy` define como a lista de providers será ordenada. `RoundRobinProviderOrderStrategy` alterna o provider inicial entre as requisições:
+
+```text
+requisição 1: ViaCEP -> BrasilAPI
+requisição 2: BrasilAPI -> ViaCEP
+requisição 3: ViaCEP -> BrasilAPI
+```
+
+O `CepService` não conhece a regra de ordenação; ele apenas solicita uma ordem à estratégia injetada.
+
+### Factory: montagem dos providers
+
+O `CepModule` usa a `useFactory` do NestJS para montar o token `CEP_PROVIDERS`:
+
+```typescript
+{
+  provide: CEP_PROVIDERS,
+  useFactory: (viaCep, brasilApi) => [viaCep, brasilApi],
+  inject: [ViaCepProvider, BrasilApiProvider],
+}
+```
+
+Essa Factory concentra a composição das fontes disponíveis. Para adicionar outro provider, é necessário registrá-lo no módulo e incluí-lo nessa Factory; o `CepService` continua dependendo apenas de `ICepProvider[]`.
+
+### Abstração de providers
+
+ViaCEP e BrasilAPI implementam `ICepProvider` e convertem seus formatos externos para `CepResult`. Cada integração tem seu próprio schema Zod, evitando que diferenças como `localidade` e `city` vazem para o restante da aplicação.
+
+## Tratamento de erros
+
+Cada tentativa pode falhar por timeout, indisponibilidade, resposta inválida ou CEP não encontrado. O serviço continua tentando os providers restantes.
+
+### Respostas finais
+
+- `404 CEP_NOT_FOUND`: todos os providers consultados retornaram `CepNotFoundException`.
+- `503 CEP_ALL_PROVIDERS_DOWN`: nenhum provider resolveu a consulta e pelo menos uma falha não foi “CEP não encontrado”. A resposta inclui os motivos registrados nas tentativas.
+- `400 Bad Request`: o CEP não possui oito dígitos após a normalização feita pela pipe.
+- `500 INTERNAL_ERROR`: falha não classificada pelo filtro global.
+
+As exceções de timeout, indisponibilidade e resposta inválida são internas ao fluxo de fallback e não são expostas diretamente como resposta HTTP.
+
+### Formato de erro
+
+O filtro global retorna:
+
+```json
+{
+  "timestamp": "2026-09-05T12:00:00.000Z",
+  "path": "/cep/00000000",
+  "message": "CEP 00000000 não encontrado",
+  "errorCode": "CEP_NOT_FOUND"
+}
+```
+
+## Decisões e trade-offs
+
+### Cache Redis com TTL de 30 dias
+
+O cache usa Redis e grava o resultado somente depois de uma consulta bem-sucedida. O TTL é de 30 dias porque um CEP raramente altera seus dados de endereço em um intervalo curto. Esse período reduz chamadas externas repetidas e mantém o dado suficientemente atual para o objetivo da aplicação.
+
+O cache é consultado antes dos providers. Portanto, o sistema não implementa um fallback para cache depois que todas as APIs falham: cache hit evita a chamada externa desde o início, enquanto cache miss segue para os providers.
+
+### Fallback também para “não encontrado”
+
+Um provider pode não reconhecer um CEP que outro provider conhece. Por isso, `CepNotFoundException` não encerra a busca imediatamente. O próximo provider é sempre tentado, e o `404` só é produzido quando todos retornam “não encontrado”.
+
+### Round-robin simples
+
+A alternância distribui o provider inicial entre as requisições e evita que uma única API seja sempre consultada primeiro. O estado da estratégia existe em memória no processo atual; não há coordenação entre múltiplas instâncias da aplicação.
+
+### Validação da resposta externa
+
+Cada integração valida a resposta com Zod antes do mapeamento. Uma resposta incompatível aciona o fallback como erro de provider.
+
+### Sem retry, circuit breaker ou fila
+
+Esses mecanismos não fazem parte da implementação atual. O fluxo é síncrono e limitado às tentativas configuradas dos providers, o que mantém o escopo adequado para uma consulta simples.
+
+## Testes
+
+Os testes estão em `src/modules/cep/test` e cobrem 10 casos em 3 suites:
+
+- fallback quando o primeiro provider falha;
+- fallback quando um provider retorna “não encontrado”;
+- `404` somente quando todos retornam “não encontrado”;
+- erro misto de “não encontrado” e indisponibilidade resultando em `503`;
+- fallback após timeout;
+- `AllProvidersUnavailableException` quando todos falham por infraestrutura;
+- retorno da `RoundRobinProviderOrderStrategy` em ordens alternadas;
+- sucesso da `TimeoutResolutionStrategy`;
+- timeout de uma tentativa pendente;
+- propagação do erro original do provider.
+
+Executar a suíte:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm test
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Com cobertura:
 
-## Resources
+```bash
+npm run test:cov
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Compilar o projeto:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+npm run build
+```
 
-## Support
+## Estrutura de pastas
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+```text
+src/
+├── common/
+│   ├── exeptions/
+│   │   ├── app.exeption.ts
+│   │   └── exeptions.ts
+│   ├── filters/
+│   │   └── app-exeption.filter.ts
+│   ├── http/
+│   │   └── http-client.service.ts
+│   └── interceptors/
+│       └── logging.interceptor.ts
+└── modules/
+    └── cep/
+        ├── cep.controller.ts
+        ├── cep.module.ts
+        ├── cep.service.ts
+        ├── entities/
+        │   └── cep.entity.ts
+        ├── interfaces/
+        │   ├── Icep.provider.ts
+        │   └── cep-result.interface.ts
+        ├── intergrations/
+        │   ├── cep-providers.tokens.ts
+        │   ├── brasilapi/
+        │   └── viacep/
+        ├── pipe/
+        │   └── cep-validation.pipe.ts
+        ├── strategies/
+        │   ├── interfaces/
+        │   ├── provider-order.tokens.ts
+        │   ├── resolution-strategy.tokens.ts
+        │   ├── round-robin-provider-order.strategy.ts
+        │   └── timeout-resolution.strategy.ts
+        └── test/
+            ├── cep.service.spec.ts
+            ├── round-robin-provider-order.strategy.spec.ts
+            └── timeout-resolution.strategy.spec.ts
+```
