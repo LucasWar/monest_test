@@ -1,12 +1,16 @@
+// providers/viacep/viacep.provider.ts
 import { Injectable } from '@nestjs/common';
 import { HttpClientService } from 'src/common/http/http-client.service';
 import { CepResult } from '../../interfaces/cep-result.interface';
 import { ICepProvider } from '../../interfaces/Icep.provider';
 import {
-  ViaCepErrorResponse,
-  ViaCepResponse,
-} from './via-cep-response.interface';
-import { CepNotFoundException } from 'src/common/exeptions/exeptions';
+  ViaCepSuccessSchema,
+  ViaCepErrorSchema,
+} from './viacep-response.schema';
+import {
+  CepNotFoundException,
+  CepProviderInvalidResponseException,
+} from 'src/common/exeptions/exeptions';
 
 @Injectable()
 export class ViaCepProvider implements ICepProvider {
@@ -14,18 +18,27 @@ export class ViaCepProvider implements ICepProvider {
 
   constructor(private readonly http: HttpClientService) {}
 
-  private isViaCepError(data: ViaCepResponse): data is ViaCepErrorResponse {
-    return 'erro' in data && data.erro === true;
-  }
-
   async fetch(cep: string): Promise<CepResult> {
-    const data = await this.http.get<ViaCepResponse>(
+    const raw = await this.http.get<unknown>(
       `https://viacep.com.br/ws/${cep}/json/`,
     );
 
-    if (this.isViaCepError(data)) {
+    const errorParsed = ViaCepErrorSchema.safeParse(raw);
+    if (errorParsed.success) {
       throw new CepNotFoundException(cep, this.name);
     }
+
+    const successParsed = ViaCepSuccessSchema.safeParse(raw);
+    if (!successParsed.success) {
+      throw new CepProviderInvalidResponseException(
+        this.name,
+        successParsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; '),
+      );
+    }
+
+    const data = successParsed.data;
 
     return {
       cep: data.cep,

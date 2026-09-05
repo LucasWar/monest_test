@@ -5,10 +5,6 @@ export interface BrasilApiSuccessResponse {
   neighborhood: string;
   street: string;
   service: 'viacep';
-  ibge: {
-    city: string;
-    state: string;
-  };
 }
 
 interface CepServiceError {

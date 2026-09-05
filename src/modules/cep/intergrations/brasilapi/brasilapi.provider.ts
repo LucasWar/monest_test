@@ -2,11 +2,15 @@ import { Injectable } from '@nestjs/common';
 import { HttpClientService } from 'src/common/http/http-client.service';
 import { CepResult } from '../../interfaces/cep-result.interface';
 import { ICepProvider } from '../../interfaces/Icep.provider';
+
 import {
-  BrasilApiErrorResponse,
-  BrasilApiResponse,
-} from './brasil-api-response.interface';
-import { CepNotFoundException } from 'src/common/exeptions/exeptions';
+  CepNotFoundException,
+  CepProviderInvalidResponseException,
+} from 'src/common/exeptions/exeptions';
+import {
+  BrasilApiErrorSchema,
+  BrasilApiSuccessSchema,
+} from './brasilapi-response.schema';
 
 @Injectable()
 export class BrasilApiProvider implements ICepProvider {
@@ -14,20 +18,27 @@ export class BrasilApiProvider implements ICepProvider {
 
   constructor(private readonly http: HttpClientService) {}
 
-  private isBrasilApiError(
-    data: BrasilApiResponse,
-  ): data is BrasilApiErrorResponse {
-    return 'name' in data && data.name === 'CepPromiseError';
-  }
-
   async fetch(cep: string): Promise<CepResult> {
-    const data = await this.http.get<BrasilApiResponse>(
+    const raw = await this.http.get<unknown>(
       `https://brasilapi.com.br/api/cep/v1/${cep}`,
     );
 
-    if (this.isBrasilApiError(data)) {
+    const errorParsed = BrasilApiErrorSchema.safeParse(raw);
+    if (errorParsed.success) {
       throw new CepNotFoundException(cep, this.name);
     }
+
+    const successParsed = BrasilApiSuccessSchema.safeParse(raw);
+    if (!successParsed.success) {
+      throw new CepProviderInvalidResponseException(
+        this.name,
+        successParsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; '),
+      );
+    }
+
+    const data = successParsed.data;
 
     return {
       cep: data.cep,
