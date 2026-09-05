@@ -1,12 +1,14 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import {
   AllProvidersUnavailableException,
   CepNotFoundException,
   CepProviderTimeoutException,
 } from 'src/common/exeptions/exeptions';
 import { CepResult } from './interfaces/cep-result.interface';
-import { CEP_PROVIDERS } from './intergrations/cep-providers.tokens';
 import { ICepProvider } from './interfaces/Icep.provider';
+import { CEP_PROVIDERS } from './intergrations/cep-providers.tokens';
 
 @Injectable()
 export class CepService {
@@ -15,9 +17,25 @@ export class CepService {
 
   constructor(
     @Inject(CEP_PROVIDERS) private readonly providers: ICepProvider[],
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
   ) {}
 
   async findByCep(cep: string): Promise<CepResult> {
+    const cacheKey = `cep:${cep}`;
+
+    const cached = await this.cache.get<CepResult>(cacheKey);
+    if (cached) {
+      this.logger.log(`CEP ${cep} resolvido via cache`);
+      return cached;
+    }
+
+    const result = await this.fetchFromProviders(cep);
+    await this.cache.set(cacheKey, result);
+
+    return result;
+  }
+
+  private async fetchFromProviders(cep: string): Promise<CepResult> {
     const order = this.getProviderOrder();
     const errors: { provider: string; reason: string }[] = [];
 
@@ -32,7 +50,6 @@ export class CepService {
         this.logger.warn(
           `Provider ${provider.name} falhou para CEP ${cep}: ${reason}`,
         );
-
         if (err instanceof CepNotFoundException) throw err;
         continue;
       }

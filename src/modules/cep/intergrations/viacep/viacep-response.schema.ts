@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const ViaCepErrorSchema = z.object({
-  erro: z.literal(true),
+  erro: z.union([z.literal(true), z.literal('true')]),
 });
 
 export const ViaCepSuccessSchema = z.object({
