@@ -38,6 +38,7 @@ export class CepService {
   private async fetchFromProviders(cep: string): Promise<CepResult> {
     const order = this.getProviderOrder();
     const errors: { provider: string; reason: string }[] = [];
+    let anyNotFound = false;
 
     for (const provider of order) {
       try {
@@ -50,9 +51,16 @@ export class CepService {
         this.logger.warn(
           `Provider ${provider.name} falhou para CEP ${cep}: ${reason}`,
         );
-        if (err instanceof CepNotFoundException) throw err;
+
+        if (err instanceof CepNotFoundException) {
+          anyNotFound = true;
+        }
         continue;
       }
+    }
+
+    if (anyNotFound) {
+      throw new CepNotFoundException(cep, 'all');
     }
 
     throw new AllProvidersUnavailableException(cep, errors);
@@ -69,12 +77,17 @@ export class CepService {
   }
 
   private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    return Promise.race([
-      promise,
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new CepProviderTimeoutException(ms)), ms),
-      ),
-    ]);
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timeoutPromise = new Promise<T>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new CepProviderTimeoutException(ms)),
+        ms,
+      );
+    });
+
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+      clearTimeout(timeoutId);
+    });
   }
 
   private getErrorMessage(err: unknown): string {
